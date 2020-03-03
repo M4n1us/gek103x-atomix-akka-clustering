@@ -80,7 +80,13 @@ Die Kommunikation zwischen den Clustern geschieht mit Netty, wobei direkte Kommu
 
 Atomix ermöglicht auch die Verwendung von verteilten Datenstrukturen wie Maps, Sets, Trees, Counters oder Werten. Die Koordination kann über verteile Locks, Semaphoren oder Elections zur Bestimmung der Master/Slaves.
 
+#### Programmierspachen
+
 Für Atomix gibt es CLI Bindings. Hauptsächlich ist das Framework jedoch für Java ausgelegt. Es gibt jedoch auch nicht aktuell gehaltene Python Bindings.
+
+#### Architektur/Datenverteilung
+
+Atomix bietet Cluster an. Ein Cluster kann aus mehreren Nodes bestehen die sich hauptsächlich durch die Konfiguration wie die Datenreplikation unterscheiden.
 
 Für die Replikation stehen mehrere Protokolle als Dependencies zur Verfügung.
 
@@ -90,7 +96,137 @@ Für die Replikation stehen mehrere Protokolle als Dependencies zur Verfügung.
 
 Diese unterscheiden sich je nach Anforderungen an Fehlertoleranz-, Konsistenz- oder Persistenz-Anforderungen
 
-### Akka
+Die Grundarchitektur in Atomix ist das Data-Grid.
+
+![image-20200303134126340](README.assets/image-20200303134126340.png)
+
+Dabei werden die Daten je nach Protokoll auf allen Clustern verteilt. Dabei werden Lese und Schreibzugriffe auf allen Nodes verteilt. Hier können über Autodiscovery dynamisch Nodes hinzugefügt werden.
+
+
+### Akka [3]
+
+Akka ist eine Sammlung aus open-source libraries für widerstandsfähige, skalierbare Systeme.  Dabei kommt ein Aktoren Modell zum Einsatz.
+
+## Implementierung
+
+### Atomix
+
+Atomix legt Wert auf das Orchestrieren und Verteilen von Daten. Daher ist ein Benchmark der Verteilgeschwindigkeit sinnvoll, da dies auch einen vergleichbaren Punkt bei anderen Frameworks bietet.
+
+Das Aufsetzen war relativ einfach, da das System durch gradle dependencies einfach zu einem Java Projekt hinzugefügt werden kann. Die Node Konfiguration kann jedoch ohne Java stattfinden.
+
+Dafür habe ich bei Atomix zwei Nodes in ein Cluster gegeben und sie mit dem Raft Konsens Algorithmus für die Konsistenz ausgestattet.
+
+```java
+AtomixBuilder builder = Atomix.builder();
+        Atomix atomix;
+        atomix = builder.withMemberId("member1")
+                .withAddress("localhost:13370")
+                .withMembershipProvider(BootstrapDiscoveryProvider.builder()
+                        .withNodes(
+                                Node.builder()
+                                        .withId("member1")
+                                        .withAddress("localhost:13370")
+                                        .build(),
+                                Node.builder()
+                                        .withId("member2")
+                                        .withAddress("localhost:13371")
+                                        .build())
+                        .build())
+                .withManagementGroup(RaftPartitionGroup.builder("system")
+                        .withNumPartitions(1)
+                        .withMembers("member1", "member2")
+                        .withDataDirectory(new File("./atomix/entry1"))
+                        .build())
+                .withPartitionGroups(
+                        PrimaryBackupPartitionGroup.builder("data")
+                                .withNumPartitions(32)
+                                .build())
+                .build();
+
+        atomix.start().join();
+```
+
+Da die gesamte Infrastruktur statisch ist, reicht für diesen kleinen Test ein lokaler BootstrapDiscoveryProvider. Dieser gibt die Daten an, welche Nodes wo zu finden sind. Man kann dies mit dynamischen Discovery Diensten ersetzten um so eben nicht gebunden zu sein.
+
+Unter `.WithManagementGroup` wird eine Raft Systempartition gebaut. Achtung bei lokalem Betrieb wird hier für jede Node ein eigenes DataDirectory benötigt.
+
+Der Code oben genügt um die Node in Betrieb zu nehmen.
+
+`atomix.start().join();` sagt der Node das alles fertig konfiguriert ist und sie jetzt startet.
+
+Die zweite Node die für die Zeitmessung zuständig ist, wird ähnlich wie oben konfiguriert, alleine die ID und das DataDirectory unterscheiden sich.
+
+Atomix verwendet eigene sogenannte "Primitives" die verteilte Funktionalität bieten. So wird im Benchmark eine verteilte Liste als "Datastore" und ein Lock zum synchronisierten Start des Benchmarks erstellt.
+
+```java
+DistributedList<Object> list = atomix.listBuilder("kappa-list")
+                .withElementType(String.class)
+                .build();
+
+DistributedLock lock = atomix.lockBuilder("kappa-lock").build();
+```
+
+Das Benchmark selbst besteht aus einfachem Abfragen, ob die Liste bereits groß genug ist (keine Tiefenüberprüfung ob die Objekte auch tatsächlich drüben sind)
+
+```java
+while(true){
+	if(lock.isLocked()){
+		break;
+	}
+}
+
+log.info("Starting benchmark...");
+Date start = new Date();
+Date end;
+while (true) {
+	if (list.size() == benchmarkSize){
+		end = new Date();
+		break;
+	}
+}
+
+long time = end.getTime() - start.getTime();
+log.info("Benchmark completed: "+ time + "ms");
+```
+
+In der ersten Node wird auf die verteilten Objekte folgendermaßen zugegriffen
+
+```java
+DistributedList<Object> list = atomix.getList("kappa-list");
+DistributedLock lock = atomix.getLock("kappa-lock");
+```
+
+Hier genügt der Name des Objektes, ähnlich wie bei vielen Message Queue Systemen.
+
+Nun wird anschließend das Lock akquiriert 
+
+```java
+while(true){
+	lock.tryLock();
+	if(lock.isLocked()){
+		break;
+	}
+}
+```
+
+und die Liste befüllt
+
+```java
+for(int i = 0; i < benchmarkSize; i++){
+	list.add("Kappa-" + i);
+}
+lock.unlock();
+log.info("Benchmark completed.");
+```
+
+Node1: Writing Node![image-20200303144840702](README.assets/image-20200303144840702.png)
+
+Node2: Benchmarking Node![image-20200303144854625](README.assets/image-20200303144854625.png)
+
+#### Akka [4]
+
+Um mich mit Akka auseinanderzusetzen habe ich den "Akka Quickstart with Java" durchgearbeitet.
 
 
 
@@ -99,4 +235,8 @@ Diese unterscheiden sich je nach Anforderungen an Fehlertoleranz-, Konsistenz- o
 [1] "Atomix - What is Atomix?", zugegriffen am 27.2.2020 [online](https://atomix.io/docs/latest/user-manual/introduction/what-is-atomix/)
 
 [2] "Atomix - Getting Started", zugegriffen am 27.2.2020 [online](https://atomix.io/docs/latest/getting-started/)
+
+[3] "Introduction to Akka", zugegriffen am 3.3.2020 [online](https://doc.akka.io/docs/akka/current/typed/guide/introduction.html?language=java)
+
+[4] "Akka Quickstart with Java", zugegriffen am 3.3.2020 [online](https://developer.lightbend.com/guides/akka-quickstart-java/)
 
