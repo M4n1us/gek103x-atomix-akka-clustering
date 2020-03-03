@@ -102,10 +102,35 @@ Die Grundarchitektur in Atomix ist das Data-Grid.
 
 Dabei werden die Daten je nach Protokoll auf allen Clustern verteilt. Dabei werden Lese und Schreibzugriffe auf allen Nodes verteilt. Hier können über Autodiscovery dynamisch Nodes hinzugefügt werden.
 
+####  Notifikation von Master oder anderen Slaves 
 
-### Akka [3]
+Je nach Protokoll Typ gibt es Master bzw. Slaves. Raft besitzt ein Election Based System wo zwischen allen Nodes ein Leader gewählt wird, alle anderen sind automatisch Follower.
 
-Akka ist eine Sammlung aus open-source libraries für widerstandsfähige, skalierbare Systeme.  Dabei kommt ein Aktoren Modell zum Einsatz.
+![image-20200303162746169](README.assets/image-20200303162746169.png)
+
+Die tatsächliche Benachrichtigung erfolgt über Events, die mittels Lambda Funktionen in Java abonniert werden können.
+
+### Akka [3, 5]
+
+Akka ist eine Sammlung aus open-source Libraries für widerstandsfähige, skalierbare Systeme.  Dabei kommt ein Aktoren Model zum Einsatz.
+
+#### Architektur
+
+Ein Aktoren Model besitzt zwei notwendige Komponenten, Nachrichten und Aktoren. Aktoren besitzen einen Input, einen Algorithmus und einen "Output". Dieser Output ist so zu verstehen das Aktoren je nach Implementierung entweder neue Nachrichten aussenden, neue Aktoren erzeugen oder ihr Verhalten ändern.
+
+Die Nachrichten zwischen diesen Aktoren werden mittels Message Queues ausgetauscht.
+
+#### Programmiersprachen
+
+Das Framework ist in Scala geschrieben und besitzt Bindings für Java und Scala.
+
+#### Datenverteilung
+
+Die Datenverteilung zwischen den Aktoren findet über Queues statt. Selbst werden die Messages nicht persistiert. Die Daten sind während der gesamten Laufzeit in-memory. Jedoch besitzt Akka die möglichkeit auf vielen Technologien aufzusetzen. So können Message Queue Technologien ersetzt werden und auch eine Persistierung der Daten ermöglichen.
+
+#### Notifikation von Master oder anderen Slaves
+
+Akka verwendet eine hierarchische Aktoren Struktur. So hat jeder Aktor einen Supervisor Aktor der für die Events der Aktoren verantwortlich ist. Auch hier wird über das Aktoren Modell via Nachrichten Statusmeldungen und Events ausgetauscht.
 
 ## Implementierung
 
@@ -228,7 +253,69 @@ Node2: Benchmarking Node![image-20200303144854625](README.assets/image-202003031
 
 Um mich mit Akka auseinanderzusetzen habe ich den "Akka Quickstart with Java" durchgearbeitet.
 
+Hier wird ein Aktorensystem erstellt, welches der Entrypoint von Akka ist. Typischerweise wird nur eines pro Applikation erzeugt. Der Name Charles wird dabei als Nachricht geschickt.
 
+```java
+final ActorSystem<GreeterMain.SayHello> greeterMain= ActorSystem.create(GreeterMain.create(), "helloakka");
+greeterMain.tell(new GreeterMain.SayHello("Charles"));
+```
+
+Hier wird ein Aktorensystem mit der Nachricht aus dem SayHello Objekt erstellt. Dieses Objekt beinhaltet einen Namen. Im zweiten Schritt wird dem Aktorensystem eine Nachricht übergeben.
+
+Das System erzeugt bei der Initialisierung einen weiteren Aktor, der die Nachricht verarbeitet.
+
+Etwas was wichtig an dem ganzen ist, das Mapping von Incoming Message zur anzuwendenden Methode.
+
+```java
+@Override
+public Receive<SayHello> createReceive() {
+        return newReceiveBuilder().onMessage(SayHello.class, this::onSayHello).build();
+}
+```
+
+Hier wird dem Aktor gesagt, welche Methode verwendet werden soll, wenn eine Nachricht vom Typ SayHello ankommt.
+
+```java
+private Behavior<SayHello> onSayHello(SayHello command) {
+    ActorRef<Greeter.Greeted> replyTo =
+        getContext().spawn(GreeterBot.create(3), command.name);
+    greeter.tell(new Greeter.Greet(command.name, replyTo));
+    return this;
+}
+```
+
+Hier wird der Aktorencontext verwendet um einen neuen Aktor zu erstellen. Dieser Aktor bekommt ein Limitierung übergeben und einen Namen für die Verarbeitung dieser Anfrage. Weiters wird er als Callback an den Greeter Aktor übergeben, der bei der Initialisierung erzeugt wurde.
+
+```java
+private Behavior<Greet> onGreet(Greet command) {
+    getContext().getLog().info("Hello {}!", command.whom);
+    command.replyTo.tell(new Greeted(command.whom, getContext().getSelf()));
+    return this;
+}
+```
+
+Der Greeter Aktor verarbeitet nun die Nachricht und gibt `Hello Charles!` aus.  Das Callback wird verwendet um dem Aktor zu sagen, dass die Nachricht bereits verarbeitet wurde. Diese "Metainformation" wird nun an den Aktor geschickt.
+
+```java
+private Behavior<Greeter.Greeted> onGreeted(Greeter.Greeted message) {
+        greetingCounter++;
+        getContext().getLog().info("Greeting {} for {}", greetingCounter, message.whom);
+        if (greetingCounter == max) {
+            return Behaviors.stopped();
+        } else {
+            message.from.tell(new Greeter.Greet(message.whom, getContext().getSelf()));
+            return this;
+        }
+    }
+```
+
+Dieser wird hier nun weiter verarbeitet und loopt das System solange bis die Abbruchbedingung erreicht wurde.
+
+![image-20200303145642678](README.assets/image-20200303145642678.png)
+
+Das ist zwar nur eine simple Demonstration das die Aktoren funktionieren, kann aber leicht erweitert und modifiziert werden.
+
+Akka erlaubt es mittels JUnit getestet zu werden.
 
 # Quellen
 
@@ -239,4 +326,6 @@ Um mich mit Akka auseinanderzusetzen habe ich den "Akka Quickstart with Java" du
 [3] "Introduction to Akka", zugegriffen am 3.3.2020 [online](https://doc.akka.io/docs/akka/current/typed/guide/introduction.html?language=java)
 
 [4] "Akka Quickstart with Java", zugegriffen am 3.3.2020 [online](https://developer.lightbend.com/guides/akka-quickstart-java/)
+
+[5] "Actor Model", zugegriffen am 3.3.2020 [online](https://de.wikipedia.org/w/index.php?title=Actor_Model&oldid=188113418)
 
